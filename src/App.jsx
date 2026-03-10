@@ -1154,6 +1154,7 @@ export default function App() {
   const [displayMode, setDisplayMode] = useState("cards"); // "cards" | "table"
   const [aiGestart, setAiGestart] = useState(false);
   const [meta, setMeta] = useState({ provinces: [], types: [], regios: [] });
+  const [cardThumbErrors, setCardThumbErrors] = useState({}); // id -> true when thumb image failed to load
 
   // Laad panden + start meteen batch verrijking
   const laadPanden = useCallback(async (p = 1, currentFilters = null) => {
@@ -1309,23 +1310,31 @@ export default function App() {
     return true;
   });
 
-  // Helper: merged AI for card (enrichment + platform scan fallback for Airbnb/Booking)
-  const getCardAi = (id) => {
+  // Helper: merged AI for card (enrichment + platform scan + website-is-Airbnb/Booking)
+  const getCardAi = (id, property = null) => {
     const en = enriched[id];
     const scan = platformScan[id];
+    let ai = null;
     if (en) {
-      return {
+      ai = {
         ...en,
         airbnb: en.airbnb?.gevonden ? en.airbnb : (scan?.airbnb?.gevonden ? scan.airbnb : { gevonden: false }),
         booking: en.booking?.gevonden ? en.booking : (scan?.booking?.gevonden ? scan.booking : { gevonden: false }),
       };
+    } else if (scan) {
+      ai = { airbnb: scan.airbnb || { gevonden: false }, booking: scan.booking || { gevonden: false }, directWebsite: scan.website ? { gevonden: scan.website.gevonden, url: scan.website.url } : {} };
     }
-    return scan ? { airbnb: scan.airbnb || { gevonden: false }, booking: scan.booking || { gevonden: false }, directWebsite: scan.website ? { gevonden: scan.website.gevonden, url: scan.website.url } : {} } : null;
+    if (property?.website && typeof property.website === "string") {
+      const w = property.website.toLowerCase();
+      if (w.includes("airbnb.com") && !ai?.airbnb?.gevonden) ai = { ...(ai || {}), airbnb: { gevonden: true, url: property.website } };
+      if (w.includes("booking.com") && !ai?.booking?.gevonden) ai = { ...(ai || {}), booking: { gevonden: true, url: property.website } };
+    }
+    return ai;
   };
 
   // Extra filters (AI-enrichment + platform-scan based)
   zichtbaar = zichtbaar.filter(p => {
-    const ai = getCardAi(p.id);
+    const ai = getCardAi(p.id, p);
     if (filters.heeftAirbnb && !(ai?.airbnb?.gevonden)) return false;
     if (filters.heeftBooking && !(ai?.booking?.gevonden)) return false;
     if (filters.geenAgentuur && enriched[p.id]?.waarschuwingAgentuur) return false;
@@ -1341,15 +1350,15 @@ export default function App() {
       const bS = sOrd[enriched[b.id]?.score] ?? 3;
       if (aS !== bS) return aS - bS;
       let aP = enriched[a.id]?.prioriteit ?? 5, bP = enriched[b.id]?.prioriteit ?? 5;
-      const aPlatform = getCardAi(a.id)?.airbnb?.gevonden || getCardAi(a.id)?.booking?.gevonden;
-      const bPlatform = getCardAi(b.id)?.airbnb?.gevonden || getCardAi(b.id)?.booking?.gevonden;
+      const aPlatform = getCardAi(a.id, a)?.airbnb?.gevonden || getCardAi(a.id, a)?.booking?.gevonden;
+      const bPlatform = getCardAi(b.id, b)?.airbnb?.gevonden || getCardAi(b.id, b)?.booking?.gevonden;
       if (aPlatform && !bPlatform) aP += 2;
       if (bPlatform && !aPlatform) bP += 2;
       return bP - aP;
     }
     if (sorteer === "platform") {
-      const aPlat = getCardAi(a.id)?.airbnb?.gevonden || getCardAi(a.id)?.booking?.gevonden;
-      const bPlat = getCardAi(b.id)?.airbnb?.gevonden || getCardAi(b.id)?.booking?.gevonden;
+      const aPlat = getCardAi(a.id, a)?.airbnb?.gevonden || getCardAi(a.id, a)?.booking?.gevonden;
+      const bPlat = getCardAi(b.id, b)?.airbnb?.gevonden || getCardAi(b.id, b)?.booking?.gevonden;
       if (aPlat && !bPlat) return -1;
       if (!aPlat && bPlat) return 1;
       return (a.name || "").localeCompare(b.name || "");
@@ -1675,7 +1684,7 @@ export default function App() {
               </thead>
               <tbody>
                 {zichtbaar.map((p, i) => {
-                  const ai = getCardAi(p.id);
+                  const ai = getCardAi(p.id, p);
                   const platformLabels = [];
                   if (ai?.airbnb?.gevonden) platformLabels.push("Airbnb");
                   if (ai?.booking?.gevonden) platformLabels.push("Booking");
@@ -1720,8 +1729,8 @@ export default function App() {
         )}
 
         {displayMode !== "table" && zichtbaar.map((prop, idx) => {
-          const ai = getCardAi(prop.id);
-          const fullAi = enriched[prop.id]; // full enrichment (score, agentuur, poor site)
+          const ai = getCardAi(prop.id, prop);
+          const fullAi = enriched[prop.id]; // full enrichment (score, agentuur, poor site, fotoUrls)
           const sc = fullAi?.score ? SCORES[fullAi.score] : null;
           const uitkomst = outcomes[prop.id];
           const isVerborgen = hidden.includes(prop.id);
@@ -1768,100 +1777,113 @@ export default function App() {
                 addPhone(prop.phone); addPhone(prop.phone2); addPhone(prop["contact-phone"]);
                 addPhone(prop["telefoon"]); addPhone(prop["phone1"]);
                 if (Array.isArray(prop.phones)) prop.phones.forEach(addPhone);
+                const firstPhotoUrl = (fullAi?.airbnb?.fotoUrls?.[0] || fullAi?.booking?.fotoUrls?.[0] || fullAi?.directWebsite?.fotoUrls?.[0] || fullAi?.alleFotos?.[0]);
+                const showThumb = firstPhotoUrl?.startsWith("http") && !cardThumbErrors[prop.id];
 
                 return (<>
-              {/* Card header: name + score + date + flags */}
-              <div style={{ ...S.kaartTop, marginBottom: 10 }}>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={S.kaartNaam}>{prop.name}</div>
-                  {(street || city || fullAddress) && (
-                    <div style={{ fontSize: 11, color: T.textMid, marginTop: 2, display: "flex", alignItems: "center", gap: 3, overflow: "hidden" }}>
-                      <span style={{ flexShrink: 0 }}>📍</span>
-                      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        {[street, postalCode, city].filter(Boolean).join(", ") || fullAddress}
-                      </span>
-                    </div>
-                  )}
-                  <div style={{ fontSize: 11, color: T.textLight, marginTop: 2, display: "flex", flexWrap: "wrap", gap: "2px 6px" }}>
-                    {province && <span>{province}</span>}
-                    {prop.toeristischeRegio && <span style={{ fontWeight: 500 }}>{prop.toeristischeRegio}</span>}
-                    {sleep > 0 && <span>🛏 {sleep}</span>}
-                    {units > 1 && <span>🏠 {units}x</span>}
-                    {prop.onlineSince && <span>· 🗓 {new Date(prop.onlineSince).toLocaleDateString("nl-BE", { day: "numeric", month: "short", year: "numeric" })}</span>}
-                  </div>
-                </div>
-                <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6, flexShrink: 0 }}>
-                  {sc && <span style={{ ...S.scoreBadge, background: sc.pale, color: sc.kleur, border: `1px solid ${sc.border}` }}>{sc.emoji} {fullAi.score}</span>}
-                  {enrichingIds.has(prop.id) && <span style={S.enrichingDot} />}
-                  {isAgency && <span style={S.agentuurPill} title={fullAi.agentuurSignalen}>Makelaar/agentuur</span>}
-                  {poorWebsite && <span style={S.poorSitePill} title="Website slecht gebouwd – kans voor yourdomi">Slechte site</span>}
-                </div>
-              </div>
-
-              {/* Tags row: status, portfolio, outcome, contract */}
-              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
-                {prop.status && <span style={S.statusTag}>{prop.status}</span>}
-                {heeftPortfolio && <span style={S.portfolioTag}>🏘 {portfolioAantal} panden</span>}
-                {uitkomst && uitkomst !== "none" && <span style={{ ...S.uitkomstBadge, ...uitkomstStijl(uitkomst) }}>{uitkomstLabel(uitkomst)}</span>}
-                {fullAi?.contractadvies && (
-                  <span style={{ ...S.contractTag, background: CONTRACT_INFO[fullAi.contractadvies]?.color + "20", color: CONTRACT_INFO[fullAi.contractadvies]?.color, border: `1px solid ${CONTRACT_INFO[fullAi.contractadvies]?.color}40` }}>
-                    {CONTRACT_INFO[fullAi.contractadvies]?.pct} {CONTRACT_INFO[fullAi.contractadvies]?.label}
-                  </span>
-                )}
-              </div>
-
-              {/* Contact block: phone(s), email, website */}
-              <div style={{ display: "flex", flexDirection: "column", gap: 4, paddingTop: 6, borderTop: `1px solid ${T.borderLight}` }}>
-                {phones.length > 0 ? phones.map((tel, ti) => (
-                  <a key={ti} href={`tel:${tel}`} onClick={e => e.stopPropagation()}
-                    style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: T.textMid, textDecoration: "none" }}>
-                    <span style={{ flexShrink: 0 }}>📞</span>
-                    <span style={{ fontWeight: 500 }}>{tel}</span>
-                    {phones.length > 1 && <span style={{ fontSize: 9, color: T.textLight }}>#{ti+1}</span>}
-                  </a>
-                )) : (prop.email || prop["contact-email"]) ? (
-                  <a href={`mailto:${prop.email || prop["contact-email"]}`} onClick={e => e.stopPropagation()}
-                    style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: T.textMid, textDecoration: "none" }}>
-                    <span>✉️</span>
-                    <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 200 }}>{prop.email || prop["contact-email"]}</span>
-                  </a>
-                ) : (
-                  <div style={{ fontSize: 11, color: T.textLight, fontStyle: "italic", display: "flex", alignItems: "center", gap: 4 }}><span>📵</span> Geen contact</div>
-                )}
-                {(() => {
-                  const aiWebsite = fullAi?.directWebsite;
-                  const websiteWerkt = aiWebsite?.gevonden && aiWebsite?.werkt !== false && aiWebsite?.url;
-                  const rawWebsite = prop.website || prop["contact-website"] || prop["website"];
-                  if (aiWebsite && !websiteWerkt && !poorWebsite) return null;
-                  if (websiteWerkt) return (
-                    <a href={(aiWebsite.url || "").startsWith("http") ? aiWebsite.url : "https://" + aiWebsite.url}
-                      target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()}
-                      style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: T.green, textDecoration: "none" }}>
-                      <span>🌐</span>
-                      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 180 }}>{(aiWebsite.url || "").replace(/^https?:\/\//, "").replace(/\/$/, "")}</span>
-                    </a>
-                  );
-                  if (rawWebsite) return (
-                    <a href={(rawWebsite || "").startsWith("http") ? rawWebsite : "https://" + rawWebsite}
-                      target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()}
-                      style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: T.textLight, textDecoration: "none" }}>
-                      <span>🌐</span>
-                      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 180 }}>{(rawWebsite || "").replace(/^https?:\/\//, "").replace(/\/$/, "")}</span>
-                      <span style={{ fontSize: 9, color: T.textLight }}>?</span>
-                    </a>
-                  );
-                  return null;
-                })()}
-              </div>
-
-              {/* Platform pills: Airbnb, Booking (from enrichment or scan), photos */}
-              {(ai?.airbnb?.gevonden || ai?.booking?.gevonden || (fullAi?.airbnb?.fotoUrls?.length || fullAi?.booking?.fotoUrls?.length || fullAi?.alleFotos?.length)) && (
-                <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginTop: 6, paddingTop: 6, borderTop: `1px solid ${T.borderLight}` }}>
-                  {ai?.airbnb?.gevonden && <span style={S.platformPillAirbnb}>Airbnb</span>}
-                  {ai?.booking?.gevonden && <span style={S.platformPillBooking}>Booking</span>}
-                  {(fullAi?.airbnb?.fotoUrls?.length || fullAi?.booking?.fotoUrls?.length || fullAi?.alleFotos?.length) ? <span style={S.fotoPill}>📷</span> : null}
+              {/* Thumbnail from Airbnb/Booking/website (when AI has fetched photos) */}
+              {showThumb ? (
+                <img src={firstPhotoUrl} alt="" style={S.kaartThumb} onError={() => setCardThumbErrors(prev => ({ ...prev, [prop.id]: true }))} />
+              ) : (
+                <div style={{ ...S.kaartThumb, display: "flex", alignItems: "center", justifyContent: "center", background: T.bgCardAlt }}>
+                  <span style={{ fontSize: 32, opacity: 0.4 }}>🏡</span>
                 </div>
               )}
+
+              <div style={S.kaartBody}>
+                {/* Header: name + address + meta */}
+                <div style={S.kaartTop}>
+                  <div style={S.kaartNaamBlok}>
+                    <div style={S.kaartNaam}>{prop.name}</div>
+                    {(street || city || fullAddress) && (
+                      <div style={{ fontSize: 11, color: T.textMid, marginTop: 4, display: "flex", alignItems: "center", gap: 3, overflow: "hidden" }}>
+                        <span style={{ flexShrink: 0 }}>📍</span>
+                        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {[street, postalCode, city].filter(Boolean).join(", ") || fullAddress}
+                        </span>
+                      </div>
+                    )}
+                    <div style={{ fontSize: 11, color: T.textLight, marginTop: 4, display: "flex", flexWrap: "wrap", gap: "4px 8px" }}>
+                      {province && <span>{province}</span>}
+                      {prop.toeristischeRegio && <span style={{ fontWeight: 500 }}>{prop.toeristischeRegio}</span>}
+                      {sleep > 0 && <span>🛏 {sleep}</span>}
+                      {units > 1 && <span>🏠 {units}x</span>}
+                      {prop.onlineSince && <span>· 🗓 {new Date(prop.onlineSince).toLocaleDateString("nl-BE", { day: "numeric", month: "short", year: "numeric" })}</span>}
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 6, flexShrink: 0 }}>
+                    {sc && <span style={{ ...S.scoreBadge, background: sc.pale, color: sc.kleur, border: `1px solid ${sc.border}` }}>{sc.emoji} {fullAi.score}</span>}
+                    {enrichingIds.has(prop.id) && <span style={S.enrichingDot} />}
+                    {isAgency && <span style={S.agentuurPill} title={fullAi.agentuurSignalen}>Makelaar/agentuur</span>}
+                    {poorWebsite && <span style={S.poorSitePill} title="Website slecht gebouwd – kans voor yourdomi">Slechte site</span>}
+                  </div>
+                </div>
+
+                {/* Tags: status, portfolio, outcome, contract */}
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                  {prop.status && <span style={S.statusTag}>{prop.status}</span>}
+                  {heeftPortfolio && <span style={S.portfolioTag}>🏘 {portfolioAantal} panden</span>}
+                  {uitkomst && uitkomst !== "none" && <span style={{ ...S.uitkomstBadge, ...uitkomstStijl(uitkomst) }}>{uitkomstLabel(uitkomst)}</span>}
+                  {fullAi?.contractadvies && (
+                    <span style={{ ...S.contractTag, background: CONTRACT_INFO[fullAi.contractadvies]?.color + "20", color: CONTRACT_INFO[fullAi.contractadvies]?.color, border: `1px solid ${CONTRACT_INFO[fullAi.contractadvies]?.color}40` }}>
+                      {CONTRACT_INFO[fullAi.contractadvies]?.pct} {CONTRACT_INFO[fullAi.contractadvies]?.label}
+                    </span>
+                  )}
+                </div>
+
+                {/* Contact: phone(s), email, website */}
+                <div style={{ display: "flex", flexDirection: "column", gap: 6, paddingTop: 10, borderTop: `1px solid ${T.borderLight}` }}>
+                  {phones.length > 0 ? phones.map((tel, ti) => (
+                    <a key={ti} href={`tel:${tel}`} onClick={e => e.stopPropagation()}
+                      style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: T.textMid, textDecoration: "none" }}>
+                      <span style={{ flexShrink: 0 }}>📞</span>
+                      <span style={{ fontWeight: 500 }}>{tel}</span>
+                      {phones.length > 1 && <span style={{ fontSize: 9, color: T.textLight }}>#{ti+1}</span>}
+                    </a>
+                  )) : (prop.email || prop["contact-email"]) ? (
+                    <a href={`mailto:${prop.email || prop["contact-email"]}`} onClick={e => e.stopPropagation()}
+                      style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: T.textMid, textDecoration: "none" }}>
+                      <span>✉️</span>
+                      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 200 }}>{prop.email || prop["contact-email"]}</span>
+                    </a>
+                  ) : (
+                    <div style={{ fontSize: 11, color: T.textLight, fontStyle: "italic", display: "flex", alignItems: "center", gap: 4 }}><span>📵</span> Geen contact</div>
+                  )}
+                  {(() => {
+                    const aiWebsite = fullAi?.directWebsite;
+                    const websiteWerkt = aiWebsite?.gevonden && aiWebsite?.werkt !== false && aiWebsite?.url;
+                    const rawWebsite = prop.website || prop["contact-website"] || prop["website"];
+                    if (aiWebsite && !websiteWerkt && !poorWebsite) return null;
+                    if (websiteWerkt) return (
+                      <a href={(aiWebsite.url || "").startsWith("http") ? aiWebsite.url : "https://" + aiWebsite.url}
+                        target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()}
+                        style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: T.green, textDecoration: "none" }}>
+                        <span>🌐</span>
+                        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 180 }}>{(aiWebsite.url || "").replace(/^https?:\/\//, "").replace(/\/$/, "")}</span>
+                      </a>
+                    );
+                    if (rawWebsite) return (
+                      <a href={(rawWebsite || "").startsWith("http") ? rawWebsite : "https://" + rawWebsite}
+                        target="_blank" rel="noreferrer" onClick={e => e.stopPropagation()}
+                        style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: T.textLight, textDecoration: "none" }}>
+                        <span>🌐</span>
+                        <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 180 }}>{(rawWebsite || "").replace(/^https?:\/\//, "").replace(/\/$/, "")}</span>
+                        <span style={{ fontSize: 9, color: T.textLight }}>?</span>
+                      </a>
+                    );
+                    return null;
+                  })()}
+                </div>
+
+                {/* Platform pills: Airbnb, Booking (incl. when website is Airbnb/Booking URL) */}
+                {(ai?.airbnb?.gevonden || ai?.booking?.gevonden || (fullAi?.airbnb?.fotoUrls?.length || fullAi?.booking?.fotoUrls?.length || fullAi?.alleFotos?.length)) && (
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap", paddingTop: 8, borderTop: `1px solid ${T.borderLight}` }}>
+                    {ai?.airbnb?.gevonden && <span style={S.platformPillAirbnb}>Airbnb</span>}
+                    {ai?.booking?.gevonden && <span style={S.platformPillBooking}>Booking</span>}
+                    {(fullAi?.airbnb?.fotoUrls?.length || fullAi?.booking?.fotoUrls?.length || fullAi?.alleFotos?.length) ? <span style={S.fotoPill}>📷</span> : null}
+                  </div>
+                )}
+              </div>
               </>);
             })()}
             </div>
@@ -2698,17 +2720,21 @@ const S = {
   demoBanner: { background: '#FFF8E6', color: '#8a6a10', border: '1px solid #e8c84a50', borderBottom: '1px solid #e8c84a50', padding: '8px 16px', fontSize: 12, lineHeight: 1.5 },
   errorBar: { background: T.redPale, color: T.red, padding: '8px 16px', fontSize: 12, borderBottom: `1px solid ${T.red}30` },
   // Lijst
-  lijst: { padding: "16px 0 0", display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: "10px", alignItems: "stretch" },
+  lijst: { padding: "16px 0 0", display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: 14, alignItems: "stretch" },
   loadingMsg: { textAlign: "center", color: T.textLight, padding: 24, fontSize: 13 },
   leegMelding: { textAlign: "center", color: T.textLight, padding: 40, fontSize: 13 },
   kaart: {
-    background: T.bgCard, borderRadius: 12, padding: "16px 18px",
+    background: T.bgCard, borderRadius: 14, padding: 0,
     boxShadow: T.shadow, cursor: "pointer",
     border: `1px solid ${T.border}`,
+    overflow: "hidden",
+    display: "flex", flexDirection: "column",
   },
-  kaartTop: { display: "flex", justifyContent: "space-between", gap: 8, marginBottom: 8 },
+  kaartThumb: { width: "100%", height: 120, background: T.bgCardAlt, objectFit: "cover", flexShrink: 0 },
+  kaartBody: { padding: "18px 20px 20px", flex: 1, display: "flex", flexDirection: "column", gap: 12 },
+  kaartTop: { display: "flex", justifyContent: "space-between", gap: 10, marginBottom: 0 },
   kaartNaamBlok: { flex: 1, minWidth: 0 },
-  kaartNaam: { fontSize: 14, fontWeight: 700, color: T.text, marginBottom: 2, lineHeight: 1.3, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" },
+  kaartNaam: { fontSize: 15, fontWeight: 700, color: T.text, marginBottom: 4, lineHeight: 1.3, display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" },
   kaartAdres: { fontSize: 12, color: T.textLight },
   kaartRechts: { display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4, flexShrink: 0 },
   scoreBadge: { fontSize: 10, fontWeight: 700, borderRadius: 6, padding: "3px 8px", letterSpacing: 0.5 },
